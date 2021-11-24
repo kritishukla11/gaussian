@@ -1,0 +1,25 @@
+#!/bin/bash
+#echo -n "Enter keyword:";read keyword
+
+for i in *.xyz
+do
+#################################################################
+mem=17400 #######################################################
+procs=8 ########################################################
+keyword="#p opt=(noeigen) freq wb97xd 6-311+G(d,p)" ###
+#################################################################
+fil=`echo ${i/%.xyz/_opt-gs.gjf}`                                                  
+C=0            
+natoms=`wc -l $i | awk '{print $1-2}'`        
+
+echo  $keyword > ${fil}
+echo "" >> ${fil}       #print a blank line
+echo built from ${i} using build-job script >> ${fil}      #print the flie name
+echo "" >> ${fil}       
+echo  "" 0 1 >> ${fil}  #print the charge and  spin 
+tail -n +3 $i >> ${fil}    #paste the xyz to the new  com input files
+echo "" >> ${fil}  
+echo "" >> ${fil}       
+
+done
+python ~/bin/GAUSSIAN/Gsub.py -g G16A03SSE4 -m 32 -p 16 *gjf
