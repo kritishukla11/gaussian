@@ -1,0 +1,32 @@
+//gjf file to xyz
+#!/bin/bash
+for file_name in *.gjf; do
+tail -1 $file_name  > ${file_name%.*}.xyz
+echo"" >> ${file_name%.*}.xyz
+grep '[0-9]\.[0-9][0-9]' $file_name >> ${file_name%.*}.xyz
+done
+
+//xtb code
+xtb {input-file-name}.xyz -o --chrg 1 --uhf 1
+bash ~/bin/xtb/JOBSUB/c.sh filename.xyz 
+
+//convert the xyz file to a gjf file
+bash ~/bin/GAUSSIAN/xyz2gjf.sh
+//If this submits it to the queue kill the job with qdel {job-id} 
+
+//open the gjf file in a text editing program 
+//format:
+//% lines specify computing requirements
+//# job requirements 0
+
+//title
+
+//charge multiplicity
+//atom x y z coordinates
+
+//Check the charge and multiplicity. multiplicity = either 1 (singlet, no unpaired e–) 2 (doublet, 1 unpaired e–) or 3 (triplet, 2 unpaired e–)
+
+//change the # job requirement line (referred to as a route line):
+
+//submit the job using the Gsub script:
+python ~/bin/GAUSSIAN/Gsub-2020.py -g G16A03SSE4 -m 16 -p 8 filename.gjf
