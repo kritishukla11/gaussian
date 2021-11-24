@@ -1,0 +1,617 @@
+#!/usr/bin/python
+# works with 2.6.6 (default on hoffman2) and python 2.7.X
+#  *** Usage of python 2.7.x is recommended ***
+#   This is done via the command: module load python/2.7
+#   You should add the above command to your .bashrc
+#  The script may not fully work with python3 currently but that is a furture goal
+#   If anyone can help make this compatable with python 2 & 3 that would be helpfull!
+
+####################################################
+#    ** Gaussian Hoffman2 submission scripts **    #
+#   This script builds gaussian submission files   #
+#    to submit to the hoffman2 cluster via the     #
+#   SGE queing system. (uses python 2.7.X)         #
+####################################################
+#        This script specifically                  #
+# sets up jobs using 24 cores on 1 node, and       #
+# 112GB ram for the calculation.(4Gb per core)     #
+####################################################
+# Sript written Aug/2019 by Tyler from Houk group  #
+#    Updated last on 8/2019 by Tyler               #
+####################################################
+# Email Notification Settings                      #
+#                                                  #
+# Set "send_email" to 1 and edit in your email     #
+# address to enable email notification (0 = off)   #
+#                                                  #
+# email_options:                                   #
+#   b=before, e=error, a=after, or bea for all 3   #
+#                                                  #
+
+send_email = 1
+email_options = "bea"
+
+#                                                  #
+# End of Email Notification Settings               #
+####################################################
+
+import os
+import os.path
+import sys
+import re
+import time
+from glob import glob
+from optparse import OptionParser
+import subprocess
+
+##############################
+
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    ENDC = '\033[0m'
+
+##############################
+# Works fully as long as route line is not more than one line!
+def test_route(filename):
+    # This calls the testrt gaussian utility to check if the route line is correct.
+    #   The testrt utility needs the route line extracted from the .gjf file
+    #     which is done by the following code. Then gaussian is loaded and
+    #      the test is performed, and if route is good you should see the test pass.
+    with open(filename) as file:
+        lines = file.read().splitlines()
+        for line in lines:
+            if "#" in line:
+                route = line
+    cmdline = '. /u/local/Modules/default/init/modules.sh && module load gaussian && testrt "'
+    cmdline += route
+    cmdline += '"'
+    print "command: ",cmdline
+    print "route: ",route
+    print "if the route above is not the full route then your input file has a route line that is more than 1 line and this won't work. That does NOT mean you input is set up incorrectly."
+    print subprocess.Popen(cmdline, shell=True, stdout=subprocess.PIPE).stdout.read()
+
+##############################
+# Works fully!
+def test_job(g_filename, chk_mem):
+    # Test job adds %kjob l301 as a link0 command which kills the job after the link 301 program
+    #   is finished, at which point the job has gotten to the point were the atoms/keywords are read
+    #    and you can have a good idea if the calculation will run (atleast start) succesfully.
+    #   This allows for a quick check before a full submission. This is done on the login node
+    #    and thus you don't have to wait for a job to start in the queue to know if you set it up right.
+    #       removes %mem, %nproc/%cpu, and %chk/%oldchk to make calculation easier.
+    with open(g_filename + "_test_job.gjf", "w") as newinput:
+        newinput.write("%kjob l301\n")
+    with open(g_filename + ".gjf", "r") as input:
+        with open(g_filename + "_test_job.gjf", "a") as newinput:
+            for line in input:
+                if '%' not in line:
+                    newinput.write(line)
+                if '--link1--' in line or '--Link1--' in line:
+                    print "--link1-- job found! This may cause an error due to keywords such as Geom=Check or Guess=Read and no checkpoint file to read, you can ignore these and the test will still pass for the first route section."
+                    newinput.write(re.sub(r".*ink1--", "%kjob l301", line))
+    cmdline = '. /u/local/Modules/default/init/modules.sh && module load gaussian && g16 '
+    cmdline += g_filename + "_test_job.gjf"
+    #cmdline += " > "+ g_filename + "_test_job.out" # this didn't work? a .log file is made instead.
+    print subprocess.Popen(cmdline, shell=True, stdout=subprocess.PIPE).stdout.read()
+    with open(g_filename + "_test_job.log", "r") as logfile:
+        lines = logfile.readlines()
+        for line in lines:
+            if " Normal termination" in line:
+                print(bcolors.OKGREEN + "Gaussian job started succesfully; input file "+g_filename+" set up correctly and should be ready for full submission! " + bcolors.ENDC)
+            if "primitive gaussians" in line:
+                num_basis = line.split()[0]
+            if " NAtoms=" in line and "NActive=" in line:
+                num_atoms = line.split()[1]
+    os.system("rm -f " + g_filename + "_test_job.gjf")
+    print("The test job created a output file named " + g_filename + "_test_job.log, keep for further use or discard.")
+    # the raw_input function is python2 compatable only, I cannot find a solution that works for both python 2 and 3.
+    keepornot=raw_input("If you want to keep it type k or type d to discard: \n")
+    if keepornot.lower() == "d":
+        os.system("rm -f " + g_filename + "_test_job.log")
+        print("discarding " + g_filename + "_test_job.log")
+    else:
+        print("keeping " + g_filename + "_test_job.log")
+    if  chk_mem == True:
+        print(bcolors.OKBLUE + "Using Gaussian freqmem utility to check memory requirments for the calculation based on number of atoms and number of basis functions:" + bcolors.ENDC)
+        print("number of atoms: "+ num_atoms +" and number of basis functins: "+ num_basis)
+        # Maybe We can just use one of these, they are fairly similar until the calculations get very large.
+        openorclosed=raw_input("Are your calculations open-shell(unrestricted), type u or closed-shell(restricted), type r: \n")
+        if openorclosed == "r":
+            print "For closed-shell (restricted) Gaussian frequency calculations the memory requirements are:"
+            cmdline2 = '. /u/local/Modules/default/init/modules.sh && module load gaussian && freqmem '
+            cmdline2 += num_atoms + " " + num_basis + " r d > stdout"
+            subprocess.Popen(cmdline2, shell=True, stdout=subprocess.PIPE)
+            time.sleep(.5)
+            with open("stdout", "r") as output:
+                lines = output.readlines()
+                for line in lines:
+                    if "Minimum" in line:
+                        min_memMW = float(line.split()[2])
+                        min_memMB = str(min_memMW*8)
+                        min_memGB = str(min_memMW*8/1000)
+                        print("Mininmum memory required for the calculation with up to D basis functions is "+ min_memMB +"MB or "+ min_memGB +"GB per core(or per thread).")
+            cmdline2 = '. /u/local/Modules/default/init/modules.sh && module load gaussian && freqmem '
+            cmdline2 += num_atoms + " " + num_basis + " r f > stdout1"
+            subprocess.Popen(cmdline2, shell=True, stdout=subprocess.PIPE)
+            time.sleep(.5)
+            with open("stdout1", "r") as output:
+                lines = output.readlines()
+                for line in lines:
+                    if "Minimum" in line:
+                        min_memMW = float(line.split()[2])
+                        min_memMB = str(min_memMW*8)
+                        min_memGB = str(min_memMW*8/1000)
+                        print("Mininmum memory required for the calculation with up to F basis functions is "+ min_memMB +"MB or "+ min_memGB +"GB per core(or per thread).")
+            cmdline2 = '. /u/local/Modules/default/init/modules.sh && module load gaussian && freqmem '
+            cmdline2 += num_atoms + " " + num_basis + " r h > stdout2"
+            subprocess.Popen(cmdline2, shell=True, stdout=subprocess.PIPE)
+            time.sleep(.5)
+            with open("stdout2", "r") as output:
+                lines = output.readlines()
+                for line in lines:
+                    if "Minimum" in line:
+                        min_memMW = float(line.split()[2])
+                        min_memMB = str(min_memMW*8)
+                        min_memGB = str(min_memMW*8/1000)
+                        print("Mininmum memory required for the calculation with up to H basis functions is "+ min_memMB +"MB or "+ min_memGB +"GB per core(or per thread).")
+            os.system('rm stdout')
+            os.system('rm stdout1')
+            os.system('rm stdout2')
+        else:
+            print "For open-shell (unrestricted) Gaussian frequency calculations the memory requirements are:"
+            cmdline2 = '. /u/local/Modules/default/init/modules.sh && module load gaussian && freqmem '
+            cmdline2 += num_atoms + " " + num_basis + " u d > stdout"
+            subprocess.Popen(cmdline2, shell=True, stdout=subprocess.PIPE)
+            time.sleep(.5)
+            with open("stdout", "r") as output:
+                lines = output.readlines()
+                for line in lines:
+                    if "Minimum" in line:
+                        min_memMW = float(line.split()[2])
+                        min_memMB = str(min_memMW*8)
+                        min_memGB = str(min_memMW*8/1000)
+                        print("Mininmum memory required for the calculation with up to D basis functions is "+ min_memMB +"MB or "+ min_memGB +"GB per core(or per thread).")
+            cmdline2 = '. /u/local/Modules/default/init/modules.sh && module load gaussian && freqmem '
+            cmdline2 += num_atoms + " " + num_basis + " u f > stdout1"
+            subprocess.Popen(cmdline2, shell=True, stdout=subprocess.PIPE)
+            time.sleep(.5)
+            with open("stdout1", "r") as output:
+                lines = output.readlines()
+                for line in lines:
+                    if "Minimum" in line:
+                        min_memMW = float(line.split()[2])
+                        min_memMB = str(min_memMW*8)
+                        min_memGB = str(min_memMW*8/1000)
+                        print("Mininmum memory required for the calculation with up to F basis functions is "+ min_memMB +"MB or "+ min_memGB +"GB per core(or per thread).")
+            cmdline2 = '. /u/local/Modules/default/init/modules.sh && module load gaussian && freqmem '
+            cmdline2 += num_atoms + " " + num_basis + " u h > stdout2"
+            subprocess.Popen(cmdline2, shell=True, stdout=subprocess.PIPE)
+            time.sleep(.5)
+            with open("stdout2", "r") as output:
+                lines = output.readlines()
+                for line in lines:
+                    if "Minimum" in line:
+                        min_memMW = float(line.split()[2])
+                        min_memMB = str(min_memMW*8)
+                        min_memGB = str(min_memMW*8/1000)
+                        print("Mininmum memory required for the calculation with up to H basis functions is "+ min_memMB +"MB or "+ min_memGB +"GB per core(or per thread).")
+            os.system('rm stdout')
+            os.system('rm stdout1')
+            os.system('rm stdout2')
+        print "Most frequency calculations may have optimal memory usage slightly above these minimum values."
+        print "Note: frequency calculations are among the most memory hungry gaussian jobs so if it is enough memory for a frequency calculation it is plenty for a geometry optimization or single-point calculations."
+        print "Remember that these are per-core values, meaning that you need multiply these values by the number of processors you use as memory usage scales linearly with processors used."
+        print "Using less than these values will make memory the main bottleneck, processor cores will go unused and your calculations will be significantly slower."
+        print "4GB per processor is recommended for calculations involving 50 or more atoms and/or 500 or more basis functions."
+        # It is usually perferable to go above the minimum required amount to ensure optimal performance, between 2GB and 4GB per core is recommended. Though going higher than 4Gb per-core is needed for larger calculations there are few nodes available that have more than 5.25GB per core.
+        #  You may also notice that these memory requirements can get very high (10-15GB per core) for large systems or large basis sets and at a point it is not feasible to use so much memory due to node limitation,
+        #   in that case using 5GB per core would still be benefical yet there are plenty of nodes available to allow for such high memory usage.
+        #  For very large frequency calculations and for large CCSD and EOM-CCSD energies, it is also desirable to leave enough memory to buffer the large disk files involved. Therefore, a Gaussian job should only be given 50-70% of the total memory on the system.
+        #     For example, on a machine with a total of 128 GB, one should typically give 64-80 GB to a job which was using all the CPUs, and leave the remaining memory for the operating system to use as disk cache.
+
+
+##############################
+# Future: More gaussian utilities?
+# freqchk?
+# chkchk?
+# formchk?
+####################################
+
+##################################################################
+
+def write_subfile(subname, g_filename, gaussian_version, nproc, time, mem, exclusive):
+    """
+    Writes a SGE batch submission file which is submitted to the queue.
+    subname (string): name of the submit file to be created
+    g_filename: Gaussian input file
+    walltime (integer): walltime for the job
+    Also threads's are binded to cores and hyperthreading disabled for best preformance on exclusive jobs.
+    Ideally we could bind threads to cores in all jobs if we could figure out how to do so.
+    """
+    output = open(subname, 'w')
+    int_ncpus = int(nproc)
+    int_mem = int(mem)
+    com_mem = str(mem)
+    if int_mem < int_ncpus:
+        com_mem=str(int_ncpus*2)
+        int_mem=int_ncpus*2
+    if int_ncpus == 1:
+        sub_memMB = int(int_mem*1024)
+        com_mem = str(mem)
+        # If greater than 4GB for 1 core, probably a mistake or using default, lets bring it back down to something reasonable.
+        # For 1 core can choose from 1GB to 4GB, not higher or lower for now...
+        if int_mem > 4:
+            sub_memMB = 2048
+            com_mem = str(2)
+        sub_mem = str(sub_memMB+1024)
+    else:
+        sub_memMB = int(int_mem*1024)
+        sub_mem = int((sub_memMB+1024)*(int_ncpus+1)/int_ncpus)
+        intsub_mem = int(sub_mem)
+        sub_mem = str(sub_mem/int_ncpus)
+    ncpus = str(int_ncpus)
+    walltime = time
+    int_time = int(time)
+    if exclusive == False:
+        exclusive = "0"
+    if exclusive == 1:
+        # Currently deciding if defaults should be lower for G09 to allow jobs to run on the smaller nodes
+        #  since G09 can run on AMD nodes with 8/12-core and only 32ish GB
+        #if gaussian_version == "G16A03" or gaussian_version == "G16A03SSE4":
+        #increase the default ncpus for the following memory calculation.
+        int_ncpus = 24
+        ncpus = "This_will_be_updated_when_job_starts"
+        # Works! default minimum is 60GB for all exclusive jobs since all nodes accesible by G16 have this much.
+        if intsub_mem < 60000:
+            sub_mem = "60000"
+            com_mem = "55"
+        else:
+            com_mem = str(mem)
+            sub_mem = str((int_mem+1024)*(int_ncpus+1)/int_ncpus)
+    highp = "0"
+    if int_time > 24:
+        highp = 1
+        print "highp job! Submitting to Houk nodes only!"
+    # Edit input file. %nproc is replaced with %cpu when exclusive. This is done via
+    #  the submit script becuase we need to find out the processor count after
+    #   the node has been allocated for the job.
+    with open(g_filename + "_temp.gjf", "w") as newinput:
+        newinput.write("%nproc="+ncpus+"\n")
+        newinput.write("%mem="+com_mem+"GB\n")
+    with open(g_filename + ".gjf", "r") as input:
+        with open(g_filename + "_temp.gjf", "a") as newinput:
+            for line in input:
+                if "%nproc" not in line and "%cpu" not in line and "%mem" not in line:
+                    newinput.write(line)
+                if '--link1--' in line or '--Link1--' in line:
+                    print "--link1-- job found! Carefully updating second link 0 keywords"
+                    newinput.write(re.sub(r".*ink1--", "%nproc="+ncpus+"\n%mem="+com_mem+"GB ", line))
+    os.rename(g_filename + "_temp.gjf", g_filename + ".gjf")
+    print "Updated input file!"
+    ###############################################################
+    # Set up submit script
+    output.write("#!/bin/bash -l\n")
+    output.write("#$ -cwd\n")
+    vmem = int(sub_mem) * int(nproc) + int(2000)
+    # Different versions of Gaussian can run on different node archetecures and the following lines are needed.
+    # Can adapt arch=intel-[Eg][5o][l-]*   to add a intel-E7- node that has 96 cores and 6000GB ram!
+    if gaussian_version == "G16A03":
+        if exclusive == 1:
+            if highp == 1:
+                output.write("#$ -l h_vmem=" + str(vmem) + "M,exclusive,h_data=" + str(sub_mem) +'M,h_rt='+ str(walltime) + ":00:00,highp,arch=intel-[Eg][5o][l-]*\n")
+            else:
+                output.write("#$ -l h_vmem=" + str(vmem) + "M,exclusive,h_data=" + str(sub_mem) +'M,h_rt='+ str(walltime) + ":00:00,arch=intel-[Eg][5o][l-]*\n")
+            # output.write("#$ -pe shared* "+str(nproc)+"\n"M) don't need for exclusive, you will get a whole node.
+        else:
+            if highp == 1:
+                output.write("#$ -l h_vmem=" + str(vmem) + "M,h_data=" + str(sub_mem) +'M,h_rt='+ str(walltime) + ":00:00,highp,arch=intel-[Eg][5o][l-]*\n")
+            else:
+                output.write("#$ -l h_vmem=" + str(vmem) + "M,h_data=" + str(sub_mem) +'M,h_rt='+ str(walltime) + ":00:00,arch=intel-[Eg][5o][l-]*\n")
+            output.write("#$ -pe shared* "+str(nproc)+"\n")
+    elif gaussian_version == "G16A03SSE4":
+        if exclusive == 1:
+            if highp == 1:
+                output.write("#$ -l h_vmem=" + str(vmem) + "M,exclusive,h_data=" + str(sub_mem) +'M,h_rt='+ str(walltime) + ":00:00,highp,arch=intel*\n")
+            else:
+                output.write("#$ -l h_vmem=" + str(vmem) + "M,exclusive,h_data=" + str(sub_mem) +'M,h_rt='+ str(walltime) + ":00:00,arch=intel*\n")
+            # output.write("#$ -pe shared* "+str(n(vmemed foMr exclusive, you will get a whole node.
+        else:
+            if highp == 1:
+                output.write("#$ -l h_vmem=" + str(vmem) + "M,h_data=" + str(sub_mem) +'M,h_rt='+ str(walltime) + ":00:00,highp,arch=intel*\n")
+            else:
+                output.write("#$ -l h_vmem=" + str(vmem) + "M,h_data=" + str(sub_mem) +'M,h_rt='+ str(walltime) + ":00:00,arch=intel*\n")
+            output.write("#$ -pe shared* "+str(nproc)+"\n")
+#    elif gaussian_version == "G09D01":
+#        if exclusive == 1:
+#            if highp == 1:
+#                output.write("#$ -l h_vmem=" + str(vmem) + ",exclusive,h_data=" + str(sub_mem) +'M,h_rt='+ str(walltime) + ":00:00,highp\n")
+#            else:
+#                output.write("#$ -l h_vmem=" + str(vmem) + ",exclusive,h_data=" + str(sub_mem) +'M,h_rt='+ str(walltime) + ":00:00\n")
+#            # output.write("#$ -pe shared* "+str(n(vmemed for exclusive, you will get a whole node.
+#        else:
+#            if highp == 1:
+#                output.write("#$ -l h_vmem=" + str(vmem) + ",h_data=" + str(sub_mem) +'M,h_rt='+ str(walltime) + ":00:00,highp\n")
+#            else:
+#                output.write("#$ -l h_vmem=" + str(vmem) + ",h_data=" + str(sub_mem) +'M,h_rt='+ str(walltime) + ":00:00\n")
+#            output.write("#$ -pe shared* "+str(nproc)+"\n")
+    # How to trap signal on hoffman?
+    #output.write("#SBATCH --signal=B:SIGUSR1@60\n") # sends a singal, SIGUSR1, 60 seconds before time out
+    output.write("#$ -j y\n")
+    output.write("#$ -o joblog." + g_filename + ".$JOB_ID\n")
+    if send_email == 1:
+        output.write("#$ -M $USER@mail\n")  # Only change email settings in the email box at the top, not here.
+        output.write("#$ -m " + email_options + "\n")
+    output.write("\n")
+    output.write("\n")
+    output.write("############################################################################\n")
+    output.write("#                                                                          #\n")
+    output.write("###################### qsub script for Gaussian job ########################\n")
+    output.write("#                                                                          #\n")
+    output.write("############################################################################\n")
+    output.write("# Write no bash commands above this hash box!\n")    # Only SGE settings above here.
+    output.write("\n")
+    if gaussian_version == "G16A03":
+        output.write(". /u/local/Modules/default/init/modules.sh\n")
+        output.write("module load gaussian/g16_avx\n")
+        output.write("exe=`which g16`\n")
+    elif gaussian_version == "G16A03SSE4":
+        output.write(". /u/local/Modules/default/init/modules.sh\n")
+        output.write("module load gaussian/g16_sse4\n")
+        output.write("exe=`which g16`\n")
+    # Add future versions of gaussian here!
+    elif gaussian_version == "G09D01":
+        output.write("export g09root='/u/local/apps/gaussian/09d01'\n") # No module file for G09D01 unlike the others...
+        output.write(". $g09root/g09/bsd/g09.profile\n")
+        output.write(". /u/local/Modules/default/init/modules.sh\n")
+        output.write("module load intel\n")
+        output.write("exe=`which g09`\n")
+    output.write("\n")
+    output.write("\n")
+    output.write("export GAUSS_SCRDIR=$TMPDIR\n")
+    output.write("\n")
+    output.write("set echo\n")
+    output.write("\n")
+    output.write("\n")
+    output.write("chkpointfile=`grep -h '%chk=' " + g_filename + ".gjf | sed -e 's/%chk=//'`\n")
+    output.write("oldchkpointfile=`grep -h '%oldchk=' " + g_filename + ".gjf | sed -e 's/%oldchk=//'`\n")
+    output.write("echo $chkpointfile\n")
+    output.write("echo $oldchkpointfile\n")
+    output.write("\n")
+    output.write("submitdir=`pwd`\n")
+    output.write("tempdir=$GAUSS_SCRDIR\n")
+    output.write("chkstoragedir=$submitdir/checkpoints\n")
+    output.write("\n")
+    # Make our on-node temp/scratch dir and send input file to it. This is recommended as it is cleaner, faster, and reduces I/O overhead for you and others users.
+    output.write("mkdir -p $tempdir/\n")
+    output.write("mkdir -p $chkstoragedir/\n")
+    #if use_storage == True:
+        # This function allows to take advatange of this extra storage by sending the checkpoint files to it.
+        #  This uses scratch(flashscratch) which means the files may be deleted in as few as 7 days.
+        #output.write("alt_chkstoragedir=/oasis/projects/nsf/cla105/$USER/" + g_filename + "\n")   # Add sub directory to our storage directory to keep things tidy.
+        #output.write("mkdir -p $alt_chkstoragedir/\n")
+        #output.write("chkstoragedir=$alt_chkstoragedir\n")
+    output.write("\n")
+    output.write("cp " + g_filename + ".gjf $tempdir/\n")
+    output.write("cp $chkstoragedir/$chkpointfile $tempdir/\n")  # To load or restart from a previous checkpoint file and if .chk is stored in the storage dir, this will be needed.
+    output.write("cp $chkstoragedir/$oldchkpointfile $tempdir/\n") # Ditto as above if reading in from %oldchk, both will ignore it of course if no chk file exists.
+    output.write("\n")
+    output.write("echo ignore any possible errors above this line. \n")
+    output.write("echo --------------------------------------------- \n")
+    output.write("echo Cluster and node setup information:\n")
+    output.write("echo current directory is: `pwd`\n")
+    output.write("echo temp working directory is: $TMPDIR\n")
+    output.write("cd $tempdir/\n")
+    output.write("\n")
+    output.write("echo now we have moved into temp directory: `pwd` \n")
+    output.write("echo      job ID is: $JOB_ID\n")
+    output.write("echo      job name is: $JOB_NAME\n")
+    output.write("echo      job hostname is: $HOSTNAME\n")
+    output.write("echo  PE hostfile name is: $PE_HOSTFILE\n")
+    output.write("echo If it exists, PE hostfile is shown below:\n")
+    output.write("cat $PE_HOSTFILE\n")
+    output.write("\n")
+    output.write("\n")
+    if exclusive == 1:
+        output.write("ncpus=`lscpu | awk '/^On-line/ {print $4}'`\n")
+        output.write("cpus=`nproc`\n")
+        output.write("echo We have been allocated a node with $cpus cores available\n")
+        output.write("echo  altering input file to enable core binding by utilizing the keywork: %cpu=$ncpus \n")
+        output.write("sed -i 's/'%nproc.*'/'%cpu=$ncpus'/g' "+ g_filename + ".gjf\n")
+    output.write("\n")
+    output.write("\n")
+    # output.write("\n") # Need to figure out how to do this on hoffman2
+    # output.write("\n") # this func cleans up the job only when job times out, normal job completion or manually cancleing finishes without problems.
+    # output.write("# catch the SIGUSR1 signal with our cleanup function\n")
+    # output.write("_cleanup() {\n")
+    # output.write("  echo the current working directory is `pwd`\n")
+    # output.write("  echo job "+ g_filename +" -ID:$JOB_ID- received SIGUSR1 at $(date).\n")
+    # output.write("  echo job "+ g_filename +" is nearly timed out so cleaning things up before deletion.\n")
+    # output.write("  cp $chkpointfile $chkstoragedir/\n")
+    # output.write("  cd $submitdir/\n")
+    # output.write("  echo succesfully cleaned up before everything was deleted!\n")
+    # output.write("}\n")
+    # output.write("\n") # !!! this is not killing the job if an link701 (SCF error) error termination occurs!!! It did terminate properly with link999 and link502 error?
+    # output.write("trap _cleanup SIGUSR1\n") # trap the SIGUSR1 signal and cleanup before job is terminated and files are lost.
+    output.write("\n")
+    output.write("echo --------------------------------------------- \n")
+    output.write("\n")
+    output.write("\n")
+    # Submitting job from our local on-node super fast storage and avoid network I/O
+    output.write("echo Hoffman2 "+ gaussian_version +" calculation of "+ g_filename +" on node: `hostname -s`\n")
+    if exclusive == 1:
+        output.write("echo This job requested entire node resources and " + str(sub_mem) + "GB RAM with exclusive keyword.\n")
+        output.write("echo This job will use $cpus cpu cores using optimal core binding while preventing hyperthreading.\n")
+        output.write("echo The input file was modified to include %cpu=$ncpus and " + str(com_mem) + "GB RAM for calculation.\n")
+    else:
+        output.write("echo This job requested " + str(ncpus) + "cpu cores and " + str(sub_mem) + "GB RAM on compute node\n")
+        output.write("echo This job used " + str(ncpus) + "cpu cores and " + str(com_mem) + "GB RAM for calculation, as requested in input file.\n")
+    output.write("echo --------------------------------------------- \n")
+    output.write("echo The job started on: $(date) \n")
+    output.write("STARTTIME=$(date +%s)\n")
+    output.write("\n")
+    output.write("\n")
+    output.write("/usr/bin/time -v -a $exe < "+ g_filename + ".gjf >  $submitdir/" + g_filename + ".out &\n")
+    output.write("wait\n")
+    output.write("\n")
+    # The added /usr/bin/time command provides a verbose (-v) data output and this is printed to the error/log file.
+    output.write("\n")
+    output.write("echo The job finished on: $(date)\n")
+    output.write("ENDTIME=$(date +%s)\n")
+    output.write("echo Overall the job took $(($ENDTIME - $STARTTIME)) seconds.\n")
+    output.write("echo --------------------------------------------- \n")
+    output.write("\n")
+    # Send completed .chk to the dir where you submitted from originally and return there before cleaning up.
+    output.write("\n")
+    output.write("cp $chkpointfile $chkstoragedir/\n")
+    # It is prefered send .chk into the storagedir (/oasis/scratch/comet/$USER/ on Comet ) to save $HOME dir space.
+    # output.write("cp " g_filename + ".rwf $chkstoragedir/\n") # If needed, we can save .rwf for better job restarting. Files get very large so do this only if needed.
+    output.write("cd $submitdir/\n")
+    output.write("bash /u/home/c/c4s4jami/bin/GAUSSIAN/out2xyz.sh\n")
+    output.write("\n")
+    # clean up. This should be done automatically anyway, but just in case.
+    output.write("rm $tempdir/*\n")
+    output.write("rmdir $tempdir/\n")
+    output.write("echo Job finished at:\n")
+    output.write("date\n")
+    output.write("\n")
+    output.write("if core_chk=`grep 'requested number of processors reduced' " + g_filename + ".out`; then\n")
+    output.write("  echo $core_chk\n")
+    output.write("  better_val=`echo $core_chk | awk '{print $9}'` \n")
+    output.write("  echo Job was limited to $better_val cores, use more memory or reduce the noumber or processors used to $better_val for best performance!\n")
+    output.write("fi\n")
+    output.write("\n")
+    output.write("echo --------------------------------------------- \n")
+    output.write("echo job accounting information:\n")
+    output.write("qstat -F -j $JOB_ID\n")
+    output.write("\n")
+    output.write("\n")
+    output.write("echo --------------------------------------------- \n")
+    output.write("echo node accounting information:\n")
+    output.write("qhost -F -h $HOSTNAME\n")
+    output.write("\n")
+    output.write("################### Job Ended ###################\n")
+    output.write("exit 0\n")
+    output.close()
+
+###############################################################################
+# Getting user arguments first. Code adapted from goodvibes and other scripts #
+###############################################################################
+def main():
+    # get command line inputs. Use -h to list all possible arguments and default values
+    parser = OptionParser(usage=bcolors.HEADER + " For all files in directory:" + bcolors.ENDC + " $ %prog [options] *.gjf   "
+                          + bcolors.HEADER + "\n        Or a single input file:" +
+                          bcolors.ENDC + " $ %prog [options] <input1>.gjf  "
+                          + bcolors.HEADER + "\n        Or multiple files seperated by spaces:" + bcolors.ENDC + " $ %prog [options] <input1>.gjf <input2>.gjf ...", version="%prog 0.2 beta")
+    # Example with current defaults submitting via $ python newGsub_devel.py *.gjf    < would submit all .gjf files in directory, requesting 8cpus, 16GB ram, and 24 hours.
+    parser.add_option("-p", "--nproc", dest="nproc", action="store",
+                      help="Enter the number of processors to be used (default 8). This will override and replace what is in input file, nodes with up to 36 cores are available, but jobs will take longer to start the more you ask for.", default=8)
+    parser.add_option("-t", "--time", dest="time", action="store",
+                      help="Enter the walltime in hours for the calculation, enter a number 0 to 336.(default 24). If 24 or less, job will submit to all shared nodes, if more than 24 only Houk nodes are accessible and the highp option is automatically added. ", default=24)
+    parser.add_option("-m", "--mem", dest="mem", action="store", help="Enter the total shared memory for the calculation in GBs, as would be in your Gaussian input file. 4GB per core is recommended but not all nodes have this much. 2GB per core is safest for shortest queue waits, as all nodes have access to this amount.(default 16). 2GB per core is automatically used if -m # is not used but -p # is. Using -m overrides this default, unless you try requesting less than 1GB per core, then it defaults back to 2GB per core. Requesting more than 4GB per core is not recommended as it will likely cause a longer queue wait time and not benefit your calculation.", default=16)
+    # Example with submitting via $ python newGsub_devel.py -p 24 *.gjf    < would submit all .gjf files in directory, requesting 24cpus, 48GB ram, and 24 hours.
+    # Submiting via $ python newGsub_devel.py -p 24 -m 1 *.gjf    < would still submit all jobs requesting 24 cpus and 48GB ram, overiding your request for only 1Gb give
+    parser.add_option("-d", "--discard", dest="discard", action="store_true",
+                      help="Use option --discard (or -d) to delete qsub submission files after submission to queue (default False).", default=False)
+    parser.add_option("-g", "--gaussian", dest="gaussian_version", action="store", help="Enter the version of gaussian to be used. Options: G16A03 G16A03SSE4 or G09D01 (default G16A03).  G16A03(default) uses the AVX instruction set which is recommended for performance, but it is limited to a subset of nodes(526 nodes)(though these are the newest and fastest nodes). G16A03SSE4 uses the SSE4 instruct set and is slower but can be used on about twice as many nodes(1058) (potentially lower queue time). G09 has access to about 25% more nodes than G16A03SSE4 (1330 nodes)(potentially even lower queue wait time, but the additional nodes are the oldest and slowest.)."
+                      + bcolors.WARNING + "\n        (Make sure to use all caps!)" + bcolors.ENDC + ".", default="G16A03", metavar="gaussian_version")
+    parser.add_option("-r", "--test_route", dest="route_test", action="store_true",
+                      help="Use option --test_route (or -r) to test the route line for input files using the gaussian utility, does not submit to queue (default False).", default=False)
+    parser.add_option("-k", "--test_job", dest="test_job", action="store_true",
+                      help="Use option --test_job (or -k) to quickly test gaussian input files using gaussian; starts a caluclation but will kill the job after link 301 finishes (about 1 second into the calculations). Does not submit to queue (default False).", default=False)
+    parser.add_option("-c", "--check_memory", dest="chk_mem", action="store_true",
+                      help="Use option --check_memory (or -c) to quickly check the minmimum memory requirements for gaussian frequency calculations. This will first test the gaussian input files using gaussian (via --test_job (or -k)); providing us with the number of basis functions for the freqmem gaussian utility. This will then print the memory requirements (in MB) you can use as a estimate for the minimum amount of memory PER core to request for optimal computational resource usage. Does not submit to queue (default False).", default=False)
+    parser.add_option("-n", "--nosub", dest="nosub", action="store_true",
+                      help="For testing, use option --nosub (or -n) to create submission files but don't submit to queue (default False). This will alter the gaussian input files to reflect the processor count and memory requested, using the default 8-core, 16GB mem settings if none (no -p/-m) is provided. This option can also be used to add or change %nproc and %mem lines to input files if desired and if that is your only goal also use option -d to discard the submission files.", default=False)
+    # The following options are currently being tested, will update in the future.
+    parser.add_option("-x", "--exclusive", dest="exclusive", action="store_true",
+                      help="Use option --exclusive (or -x) to reserve a whole node for the calculations, job will check the resources available on the node and use all of it by default. (default False). This will overide the input of -p or --nproc to ensure jobs always use the whole node.", default=False)
+    # Exclusive now will not allow input of -p (nproc) as it will reserve any single node. Once the node has been allocated the number of processors are figured out and the input file is then updated to reflect this quantity.
+    #  Unfortunatly, memory does need to be specified with exclusive for node selection. We will use 60GB as a default value (requesting 55GG in the input file) this way every node on Hoffman2 is available (all nodes have at least 64GB).
+    #   If more memory is required for the calculation request more than 60GB with -m ##GB keyword, plenty of nodes have 128GB and more so the job should still start in a reasonable amount of time.
+    # Also note that using highp (or more than 24 hours) limits you to Houk nodes only. Out of 30 Houk nodes, only 7 have more than 64GB so using more than the default exlusive 60GB and highp is not recommended for reasonable queue wait times.
+    (options, args) = parser.parse_args()
+    # Get the filenames from the command line prompt
+    files = []
+    if len(sys.argv) > 1:
+       for elem in sys.argv[1:]:
+          try:
+             if os.path.splitext(elem)[1] in [".gjf", ".gjf"]:
+                for filename in glob(elem):
+                    if options.route_test == False and options.test_job == False and options.chk_mem == False:
+                        print(bcolors.OKBLUE + "Preparing gaussian job " + filename + " input file and submission script." + bcolors.ENDC)
+                        # These lines are for fixing filename if it containes spaces or paraentheses. (will fix this in the future)
+                        # g_filename = g_filename.replace(' ', '_')
+                        # g_filename = g_filename.replace('(', '_')
+                        # g_filename = g_filename.replace(')', '_')
+                        g_filename=filename.split('.')[0]
+                        subname=g_filename+'.sh'
+                        write_subfile(subname, g_filename, options.gaussian_version, options.nproc, options.time, options.mem, options.exclusive)
+                        if options.nosub == False :
+                            os.system('qsub '+ subname)
+                            print(bcolors.OKGREEN + "Calculation " + g_filename + " has been submitted to the queue." + bcolors.ENDC)
+                            if options.discard == True :
+                                os.system("rm -f " + subname)
+                                print(bcolors.OKBLUE + "Removed gaussian job submission file, " + subname + " " + bcolors.ENDC)
+                        else:
+                            print(bcolors.OKGREEN + "Submission file for " + g_filename + " created but not submitted." + bcolors.ENDC)
+                            if options.discard == True :
+                                os.system("rm -f " + subname)
+                                print(bcolors.OKBLUE + "Removed gaussian job submission file, " + subname + " " + bcolors.ENDC)
+                    if options.route_test == True:
+                        g_filename = filename.split('.')[0]
+                        test_route(filename)
+                    if options.test_job == True or options.chk_mem == True:
+                        g_filename = filename.split('.')[0]
+                        test_job(g_filename, options.chk_mem)
+                    # else:
+                        # May add something here in the future.
+             #elif os.path.splitext(elem)[1] in [".gjf", ".gjf"] == None:
+                # This file check code is not working. If file other than .gjf is entered it will try to submit it.
+                # Currently not an issue as the "." input correctly submits only the .gjf files
+                #   and properly entering individual .gjf files works, so just don't enter other file types by mistake.
+                #   Will work on figuring this out later.
+                # print(bcolors.WARNING + "Not an gaussian inputfile?" + bcolors.ENDC)
+                # exit()
+          except IndexError:
+              print(bcolors.OKBLUE + "Gaussian job submission for Co (XSEDE) regular shared memory nodes" + bcolors.ENDC)
+              print("-------------------------------------------------")
+              print(bcolors.HEADER +"Script usage:"+ bcolors.ENDC)
+              print(bcolors.HEADER +"For a single input file: "+ bcolors.ENDC +"$ "+sys.argv[0]+" <input>.gjf ")
+              print(bcolors.HEADER +"Or with a period for all input files in directory: "+ bcolors.ENDC +"$ "+sys.argv[0]+" *.gjf ")
+              print(bcolors.HEADER +"Or multiple files seperated by spaces: "+ bcolors.ENDC +"$ "+sys.argv[0]+" <input1>.gjf <input2>.gjf ...")
+              print(bcolors.HEADER +"For testing purposes, use option --nosub to creat submission files but don't submit to queue."+ bcolors.ENDC)
+              quit()
+
+if __name__ == "__main__":
+    main()
+
+##################################################################
+
+# Walltime is in hours, can be 1 to 336.
+# Nproc can be up to 32(maybe higher?), the more cores requested the potentially longer queue time.
+# Use of Exclusive requests a full node regardless of processor numbers, this flexability allows for
+#  short queue waiting times. Once a job starts the submit script will find out how many processors are
+#  available on that node and input them into the .gjf file automatically using the recommended %cpu=#.
+# Note: 4GB of ram per core is the recommended amount for gaussian jobs, but not all nodes have
+#  4GB per core. 2GB per core is safest for short queue waits, as all nodes have access to this amount.
+#  You can still use 4GB or more per core but jobs 'may' take longer to start.
+
+# For now only .gjf files will work. You can use the follow code on your command line to convert all .gjf to .gjf:
+#>    for f in *.gjf; do mv -- "$f" ${f//gjf/com}; done
+
+##################################################################
+
+# *** On-node scratch storage is called $TMPDIR on hoffman2
+# Use $TMPDIR for job files when jobs are running and for high activity files to avoid uneccesary overhead of network traffic associated with the network file systems and improve you jobs performance.
+#  Files in $TMPDIR will be deleted by the job scheduler at the end of your job or interactive session. If you want to keep files written to $TMPDIR, tell your program to copy them to permanent space before the end of your job or session. Files written to $TMPDIR are not backed up.
+
+# *** $SCRATCH on hoffman2:
+# The global scratch file system is mounted on all nodes for hoffman2 cluser. There is a 2TB per user limit. The system provides an enivormental variable $SCRATCH which is a unique directory for your user files on the global scratch file system.
+# Under normal circumstances, files you store in $SCRATCH are allowed to remain there for 14 days. Any files older than 14 days may be automatically deleted by the system to guarantee that enough space exists for the creation of new files.
+# However, there may be occasions when even after all files older than 14 days have been deleted, there is still insufficient free space remaining. Under that circumstance, files belonging to those users who are using the preponderance of the disk space in $SCRATCH
+#  will be deleted even though they have not been there for 14 days. Files written to $SCRATCH are not backed up.
+
+##################################################################
