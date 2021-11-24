@@ -27,6 +27,10 @@ bash ~/bin/GAUSSIAN/xyz2gjf.sh
 //Check the charge and multiplicity. multiplicity = either 1 (singlet, no unpaired e–) 2 (doublet, 1 unpaired e–) or 3 (triplet, 2 unpaired e–)
 
 //change the # job requirement line (referred to as a route line):
+//for ground state opt: #p opt=(calcfc,noeigen) freq=hpmodes functional basis
+//for scan: #p opt=(modredundant,noeigen) functional basis
+//for ts opt: #p opt=(calcfc,ts,noeigen) freq=hpmodes functional basis
+//for irc: #p irc=(lqa,maxpoints=50,maxcycle=200,calcfc,nogradstop) functional basis
 
 //submit the job using the Gsub script:
 python ~/bin/GAUSSIAN/Gsub-2020.py -g G16A03SSE4 -m 16 -p 8 filename.gjf
